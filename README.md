@@ -1,2 +1,2 @@
-# novpn
-A reengineering over Google's Beyond Corp
+# NoVPN
+A reengineering over Google's Beyond Corp.
