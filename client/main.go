@@ -5,20 +5,28 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
+	"crypto/x509"
+	"crypto/tls"
+	"net/http"
+	"net/url"
+	"strconv"
+	"encoding/json"
 
 	"github.com/matishsiao/go_reuseport"
 	"github.com/songgao/water"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/crypto/ssh/terminal"
 )
 
 const (
 	// AppVersion contains current application version for -version command flag
-	AppVersion = "0.2.0b"
+	AppVersion = "0.0.1"
 )
 
 const (
@@ -27,8 +35,19 @@ const (
 
 	// BUFFERSIZE is size of buffer to receive packets
 	// (little bit bigger than maximum)
-	BUFFERSIZE = 1518
+	//BUFFERSIZE = 1518 - 32
+	BUFFERSIZE = 1486
 )
+
+type AuthResponse struct{
+    EncryptionKey string
+    UserID string
+
+    Remote map[string]*struct {
+		GwIP string
+		Routes []string
+	}
+}
 
 func rcvrThread(proto string, port int, iface *water.Interface) {
 	conn, err := reuseport.NewReusableUDPPortConn(proto, fmt.Sprintf(":%v", port))
@@ -107,99 +126,148 @@ func sndrThread(conn *net.UDPConn, iface *water.Interface) {
 		// each time get pointer to (probably) new config
 		c := config.Load().(VPNState)
 
+		//This is the inner Dst IP, this packet will be encrypted
 		dst := packet.Dst()
 
-		wanted := false
-
+		//Addr will be the public IP, should be the Gateway's IP
 		addr, ok := c.remotes[dst]
 
-		if ok {
-			wanted = true
-		}
-
-		if dst == c.Main.bcastIP || packet.IsMulticast() {
-			wanted = true
-		}
-
 		// very ugly and useful only for a limited numbers of routes!
-		if !wanted {
-			ip := packet.DstV4()
-			for n, s := range c.routes {
-				if n.Contains(ip) {
-					addr = s
-					ok = true
-					wanted = true
-					break
-				}
+		
+		ip := packet.DstV4()
+		for n, s := range c.routes {
+			if n.Contains(ip) {
+				addr = s
+				ok = true
+				break
 			}
 		}
 
-		if wanted {
-			// new len contatins also 2byte original size
-			clen := c.Main.main.AdjustInputSize(plen)
+		// new len contatins also 2byte original size
+		clen := c.Main.main.AdjustInputSize(plen)
 
-			if clen+c.Main.main.OutputAdd() > len(packet) {
-				log.Println("clen + data > len(package)", clen, len(packet))
-				continue
-			}
-
-			tsize := c.Main.main.Encrypt(packet[:clen], encrypted, ivbuf)
-
-			if ok {
-				n, err := conn.WriteToUDP(encrypted[:tsize], addr)
-				if nil != err {
-					log.Println("Error sending package:", err)
-				}
-				if n != tsize {
-					log.Println("Only ", n, " bytes of ", tsize, " sent")
-				}
-			} else {
-				// multicast or broadcast
-				for _, addr := range c.remotes {
-					n, err := conn.WriteToUDP(encrypted[:tsize], addr)
-					if nil != err {
-						log.Println("Error sending package:", err)
-					}
-					if n != tsize {
-						log.Println("Only ", n, " bytes of ", tsize, " sent")
-					}
-				}
-			}
-		} else {
-			log.Println("Unknown dst: ", dst)
+		if clen+c.Main.main.OutputAdd() > len(packet) {
+			log.Println("clen + data > len(package)", clen, len(packet))
+			continue
 		}
-	}
 
+		tsize := c.Main.main.Encrypt(packet[:clen], encrypted, ivbuf)
+
+		if ok {
+			n, err := conn.WriteToUDP(encrypted[:tsize], addr)
+			if nil != err {
+				log.Println("Error sending package:", err)
+			}
+			if n != tsize {
+				log.Println("Only ", n, " bytes of ", tsize, " sent")
+			}
+		} 
+	} 
 }
 
 func main() {
-
+	//Parameters
 	version := flag.Bool("version", false, "print lcvpn version")
+	client_cert := flag.String("cert","client.crt","client certificate (.crt)")
+	client_key := flag.String("key","client.key","client certificate key (.key)")
+	ca_cert := flag.String("ca","ca.crt","CA certificate (.crt)")
+	ace_hostname := flag.String("acehostname","localhost","ACE hostname/IP")
+	ace_port := flag.Int("aceport",443,"ACE port (default: 443)")
 	flag.Parse()
-
+	authParams := AuthResponse{}
+	//Version
 	if *version {
 		fmt.Println(AppVersion)
 		os.Exit(0)
 	}
-	//Call ACE Server
-	
+	//Print out variables
+	log.Println("Using client certificate:",*client_cert)
+	log.Println("Using client certificate key:",*client_key)
+	log.Println("Using CA certificate:",*ca_cert)
+	//##############################################################Call ACE Server
+	//Load CA certiifcate
+	caCert, err := ioutil.ReadFile(*ca_cert)
+	if nil != err{
+		log.Fatal("Cannot read CA certificate:",err)
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+	//Load client cert/key pair
+	cert, err := tls.LoadX509KeyPair(*client_cert,*client_key)
+	if nil != err{
+		log.Fatal("Cannot read Client Certificate:",err)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:      caCertPool,
+				Certificates: []tls.Certificate{cert},
+			},
+		},
+	}
+	//Make POST request to ACE server
+	fmt.Print("Password: ")
+	bytePassword, err := terminal.ReadPassword(int(syscall.Stdin))
+	fmt.Println()
+	if nil != err {
+        log.Fatal("Error reading password:",err)
+    }
+	u := url.Values{}
+	u.Set("password",string(bytePassword))
+	resp, err := client.PostForm("https://"+*ace_hostname+":"+strconv.Itoa(*ace_port)+"/login",u)
+	if nil != err {
+		log.Fatal("Could not contact ACE server:",err)
+	} else {
+		switch resp.StatusCode {
+		case 403:
+			log.Fatal("ACE Server replied: Invalid credentials.")
+		case 201:
+			log.Println("ACE Server replied: Authentication successful.")
+			json.NewDecoder(resp.Body).Decode(&authParams)
+			fmt.Println("Encryption Key:",authParams.EncryptionKey)
+			fmt.Println("User ID:",authParams.UserID)
+		default:
+			log.Fatal("Ace Server replied: Unknown error ->",resp.Status)
+			
+		}
+	}
+
 	//Start SSL agent
 	routeReload := make(chan bool, 1)
 
-	initConfig(routeReload)
+	var newConfig VPNState
 
-	conf := config.Load().(VPNState)
+	newConfig.Main.Port = 444
+	newConfig.Main.Encryption = "aescbc"
+	newConfig.Main.MainKey = authParams.EncryptionKey
+	newEFunc := newAesCbc
+	newConfig.Main.main, err = newEFunc(newConfig.Main.MainKey)
+	if nil != err {
+		log.Fatalln("main.mainkey error: %s", err.Error())
+	}
+	newConfig.routes = map[*net.IPNet]*net.UDPAddr{}
+	rmtAddr, err := net.ResolveUDPAddr("udp",fmt.Sprintf("%s:%d", "190.190.190.190", 444))
+	if nil != err {
+		log.Fatalln("Error assigning rmtAddr:",err)
+	}
+	_, route, err := net.ParseCIDR("10.0.0.0/24")
+	if nil != err {
+		log.Fatalln("Error parsing route:",err)
+	}
+	newConfig.routes[route] = rmtAddr
+	config.Store(newConfig)
 
-	iface := ifaceSetup(conf.Main.local)
+	iface := ifaceSetup("169.254.1.1/32")
 
 	// start routes changes in config monitoring
+	routeReload <- true
 	go routesThread(iface.Name(), routeReload)
 
 	log.Println("Interface parameters configured")
 
 	// Start listen threads
-	for i := 0; i < conf.Main.RecvThreads; i++ {
-		go rcvrThread("udp4", conf.Main.Port, iface)
+	for i := 0; i < 4; i++ {
+		go rcvrThread("udp4", 444, iface)
 	}
 
 	// init udp socket for write
@@ -216,7 +284,7 @@ func main() {
 
 	// Start sender threads
 
-	for i := 0; i < conf.Main.SendThreads; i++ {
+	for i := 0; i < 4; i++ {
 		go sndrThread(writeConn, iface)
 	}
 

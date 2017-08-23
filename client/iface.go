@@ -70,6 +70,7 @@ func routesThread(ifaceName string, refresh chan bool) {
 
 		for r := range conf.routes {
 			rs := r.String()
+			log.Println(rs)
 			if _, exist := routes2Del[rs]; exist {
 				delete(routes2Del, rs)
 			} else {
