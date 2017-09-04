@@ -228,7 +228,7 @@ func main() {
 			fmt.Println("User ID:",authParams.UserID)
 		default:
 			log.Fatal("Ace Server replied: Unknown error ->",resp.Status)
-			
+
 		}
 	}
 
@@ -246,6 +246,7 @@ func main() {
 		log.Fatalln("main.mainkey error: %s", err.Error())
 	}
 	newConfig.routes = map[*net.IPNet]*net.UDPAddr{}
+	
 	rmtAddr, err := net.ResolveUDPAddr("udp",fmt.Sprintf("%s:%d", "190.190.190.190", 444))
 	if nil != err {
 		log.Fatalln("Error assigning rmtAddr:",err)
