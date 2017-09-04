@@ -11,74 +11,20 @@ import (
     "database/sql"
     "log"
     "flag"
-    "os"
 
     _ "github.com/go-sql-driver/mysql"
 )
 
-func GenerateRandomBytes(n int) ([]byte, error) {
-	b := make([]byte, n)
-	_, err := rand.Read(b)
-    // Note that err == nil only if we read len(b) bytes.
-	if err != nil {
-		return nil, err
-	}
-
-	return b, nil
-}
-	
-func doAuth(username, password string) bool {
-	if username == "myusername" && password == "mypassword123"{
-		return true
-	} else {
-		return false
-	}
-}
-
-func storeEncryptionKey(username string, key []byte) (string, error) {
-	db, err := sql.Open("mysql", "root:secretpassword@tcp(127.0.0.1:3306)/novpn")
-	if err != nil {
-		log.Println("Error generating database connection:",err)
-		return "", err
-	}
-	defer db.Close()
-	
-	user_id, err := GenerateRandomBytes(32)
-	if err != nil {
-		log.Println("Error generating user-id:",err)
-		return "", err
-	}
-	
-	user_id_hex := hex.EncodeToString(user_id)
-	stmtIns, err := db.Prepare("INSERT INTO session(`username`,`user-id`,`encryption-key`) VALUES(?,?,?);")
-	if err != nil {
-		log.Println("Error preparing statement:",err)
-		return "", err
-	}
-	defer stmtIns.Close()
-	_, err = stmtIns.Exec(username,user_id_hex,key)
-	if err != nil {
-		log.Println("Could not insert encryption key to Database:",err)
-		return "", err
-	}
-	return user_id_hex, nil
-}
-
-func getGatewaysInfo() (map[string]*Gateway,error){
-	gateways := make(map[string]*Gateway)
-
-	return gateways,nil
-}
-
 type Gateway struct {
-	GatewayIP string
+	Name string
+	Hostname string
 	Routes []string
 }
 
 type AuthResponse struct{
     EncryptionKey string
     UserID string
-    
+    Gateways map[string]*Gateway
 }
 
 type handler struct{}
@@ -94,15 +40,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	log.Println("Username:",username,"Password:",password)
 	//Validate Username and Password
 	if doAuth(username,password){
-		/*
-		Auth is OK
-		Generate Encryption key
-		*/
+		//Auth is OK
+		//Generate Encryption key
 		log.Println("User",username,"successfully authenticated.")
 		encryption_key, err := GenerateRandomBytes(32)
 		if err != nil{
 			log.Println("Error generating encryption key.")
-			http.Error(w, "{\"error\":\"Unknown server erros.\"}", http.StatusInternalServerError)
+			http.Error(w, "{\"error\":\"Unknown server error.\"}", http.StatusInternalServerError)
 		}
 		//Write data to session key Database
 		user_id, err := storeEncryptionKey(username,encryption_key)
@@ -110,7 +54,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			log.Println("Error storing key:",err)
 			http.Error(w, "{\"error\":\"Unknown server error.\"}", http.StatusInternalServerError)
 		}
-		jData, err := json.Marshal(AuthResponse{hex.EncodeToString(encryption_key),user_id})
+		gateways, err := getGatewaysInfo()
+		if err != nil {
+			log.Println("Faild getting gateways info.")
+			http.Error(w, "{\"error\":\"Unknown server error.\"}", http.StatusInternalServerError)
+		}
+		jData, err := json.Marshal(AuthResponse{hex.EncodeToString(encryption_key),user_id,gateways})
 		if err != nil {
 			log.Println("Faild generating JSON object.")
 			http.Error(w, "{\"error\":\"Unknown server error.\"}", http.StatusInternalServerError)
@@ -127,15 +76,116 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func GenerateRandomBytes(n int) ([]byte, error) {
+	b := make([]byte, n)
+	_, err := rand.Read(b)
+    // Note that err == nil only if we read len(b) bytes.
+	if err != nil {
+		return nil, err
+	}
+
+	return b, nil
+}
+
+func doAuth(username, password string) bool {
+	if username == "myusername" && password == "mypassword123"{
+		return true
+	} else {
+		return false
+	}
+}
+
+func storeEncryptionKey(username string, key []byte) (string, error) {
+	db, err := sql.Open("mysql", "root:secretpassword@tcp(127.0.0.1:3306)/novpn")
+	if err != nil {
+		log.Println("Error generating database connection:",err)
+		return "", err
+	}
+	defer db.Close()
+	
+	user_id, err := GenerateRandomBytes(4)
+	if err != nil {
+		log.Println("Error generating user-id:",err)
+		return "", err
+	}
+	
+	user_id_hex := hex.EncodeToString(user_id)
+	stmtIns, err := db.Prepare("INSERT INTO session(`username`,`user-id`,`encryption-key`) VALUES(?,?,?);")
+	if err != nil {
+		log.Println("Error preparing statement:",err)
+		return "", err
+	}
+	defer stmtIns.Close()
+	log.Println(user_id_hex)
+	log.Println(key)
+	_, err = stmtIns.Exec(username,user_id_hex,key)
+	if err != nil {
+		log.Println("Could not insert encryption key to Database:",err)
+		return "", err
+	}
+	return user_id_hex, nil
+}
+
+func getGatewaysInfo() (map[string]*Gateway,error){
+	gateways := make(map[string]*Gateway)
+	db, err := sql.Open("mysql", "root:secretpassword@tcp(127.0.0.1:3306)/novpn")
+	if err != nil {
+		log.Println("Error generating database connection:",err)
+		return nil, err
+	}
+	defer db.Close()
+
+	rows, err := db.Query("SELECT id,hostname,name FROM gateways;")
+	if err != nil {
+		log.Println("Error querying database:",err)
+		return nil, err
+	}
+
+	for rows.Next(){
+		g := Gateway{}
+		var id int
+        var hostname string
+        var name string
+        err = rows.Scan(&id,&hostname,&name)
+        if err != nil {
+			log.Println("Error querying database:",err)
+			continue
+		}
+		g.Name = name
+		g.Hostname = hostname
+		g.Routes = make([]string,0,10)
+
+		stmtOut, err := db.Prepare("SELECT destination FROM routes WHERE gateway_id = ?;")
+		if err != nil {
+			log.Println("Error preparing statement:",err)
+			return nil, err
+		}
+		defer stmtOut.Close()
+
+		route_rows, err := stmtOut.Query(id)
+		if err != nil {
+			log.Println("Error querying database:",err)
+		}
+
+		for route_rows.Next(){
+			var destination string
+			err = route_rows.Scan(&destination)
+			if err != nil {
+				log.Println("Error parsing gateway's routes:",err)
+				return nil, err
+			}
+			g.Routes = append(g.Routes,destination)
+		}
+
+		log.Println("Name:",name,"Hostname:",hostname,"Routes:",g.Routes)
+		gateways[name] = &g
+	}
+	return gateways,nil
+}
+
+
 func main() {
 	log.Println("ACE server started ... ")
-	//Get gateways info
-	gateways, err := getGatewaysInfo()
-	if nil != err {
-		log.Println("Error getting Gateway information:",err)
-	}
-	log.Println(gateways)
-	os.Exit(0)
 	server_cert := flag.String("cert","client.crt","server certificate (.crt)")
 	server_key := flag.String("key","client.key","server certificate key (.key)")
 	ca_cert := flag.String("ca","ca.crt","CA certificate (.crt)")
