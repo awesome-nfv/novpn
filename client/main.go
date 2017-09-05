@@ -1,15 +1,19 @@
 package main
 
 import (
-	"crypto/rand"
+//	"crypto/rand"
 	"flag"
 	"fmt"
-	"io"
+//	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"os"
-	"os/signal"
+	"os/exec"
+	"bufio"
+	"encoding/hex"
+	"errors"
+//	"os/signal"
 	"syscall"
 	"crypto/x509"
 	"crypto/tls"
@@ -18,15 +22,16 @@ import (
 	"strconv"
 	"encoding/json"
 
-	"github.com/matishsiao/go_reuseport"
+//	"github.com/matishsiao/go_reuseport"
 	"github.com/songgao/water"
+	"github.com/kanocz/lcvpn/netlink"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
 const (
 	// AppVersion contains current application version for -version command flag
-	AppVersion = "0.0.1"
+	AppVersion = "1.0.0"
 )
 
 const (
@@ -35,139 +40,50 @@ const (
 
 	// BUFFERSIZE is size of buffer to receive packets
 	// (little bit bigger than maximum)
-	//BUFFERSIZE = 1518 - 32
-	BUFFERSIZE = 1486
+	//BUFFERSIZE = 1500 - 4
+	MTU = "1300"
+	BUFFERSIZE = 1496
 )
 
 type AuthResponse struct{
     EncryptionKey string
     UserID string
-
-    Remote map[string]*struct {
-		GwIP string
-		Routes []string
-	}
+    Gateways map[string]*Gateway
 }
 
-func rcvrThread(proto string, port int, iface *water.Interface) {
-	conn, err := reuseport.NewReusableUDPPortConn(proto, fmt.Sprintf(":%v", port))
-	if nil != err {
-		log.Fatalln("Unable to get UDP socket:", err)
-	}
-
-	encrypted := make([]byte, BUFFERSIZE)
-	var decrypted IPPacket = make([]byte, BUFFERSIZE)
-
-	for {
-		n, _, err := conn.ReadFrom(encrypted)
-
-		if err != nil {
-			log.Println("Error: ", err)
-			continue
-		}
-
-		// ReadFromUDP can return 0 bytes on timeout
-		if 0 == n {
-			continue
-		}
-
-		conf := config.Load().(VPNState)
-
-		if !conf.Main.main.CheckSize(n) {
-			log.Println("invalid packet size ", n)
-			continue
-		}
-
-		size, mainErr := DecryptV4Chk(conf.Main.main, encrypted[:n], decrypted)
-		if nil != mainErr {
-			if nil != conf.Main.alt {
-				size, err = DecryptV4Chk(conf.Main.alt, encrypted[:n], decrypted)
-				if nil != err {
-					log.Println("Corrupted package: ", mainErr, " / ", err)
-					continue
-				}
-			} else {
-				log.Println("Corrupted package: ", mainErr)
-				continue
-			}
-		}
-
-		n, err = iface.Write(decrypted[:size])
-		if nil != err {
-			log.Println("Error writing to local interface: ", err)
-		} else if n != size {
-			log.Println("Partial package written to local interface")
-		}
-	}
+type Gateway struct {
+	Hostname string
+	Ip net.IP
+	Routes []string
 }
 
-func sndrThread(conn *net.UDPConn, iface *water.Interface) {
-	// first time fill with random numbers
-	ivbuf := make([]byte, config.Load().(VPNState).Main.main.IVLen())
-	if _, err := io.ReadFull(rand.Reader, ivbuf); err != nil {
-		log.Fatalln("Unable to get rand data:", err)
-	}
-
-	var packet IPPacket = make([]byte, BUFFERSIZE)
-	var encrypted = make([]byte, BUFFERSIZE)
-
-	for {
-		plen, err := iface.Read(packet[:MTU])
-		if err != nil {
-			break
-		}
-
-		if 4 != packet.IPver() {
-			header, _ := ipv4.ParseHeader(packet)
-			log.Printf("Non IPv4 packet [%+v]\n", header)
-			continue
-		}
-
-		// each time get pointer to (probably) new config
-		c := config.Load().(VPNState)
-
-		//This is the inner Dst IP, this packet will be encrypted
-		dst := packet.Dst()
-
-		//Addr will be the public IP, should be the Gateway's IP
-		addr, ok := c.remotes[dst]
-
-		// very ugly and useful only for a limited numbers of routes!
-		
-		ip := packet.DstV4()
-		for n, s := range c.routes {
-			if n.Contains(ip) {
-				addr = s
-				ok = true
-				break
-			}
-		}
-
-		// new len contatins also 2byte original size
-		clen := c.Main.main.AdjustInputSize(plen)
-
-		if clen+c.Main.main.OutputAdd() > len(packet) {
-			log.Println("clen + data > len(package)", clen, len(packet))
-			continue
-		}
-
-		tsize := c.Main.main.Encrypt(packet[:clen], encrypted, ivbuf)
-
-		if ok {
-			n, err := conn.WriteToUDP(encrypted[:tsize], addr)
-			if nil != err {
-				log.Println("Error sending package:", err)
-			}
-			if n != tsize {
-				log.Println("Only ", n, " bytes of ", tsize, " sent")
-			}
-		} 
-	} 
+func runIP(args ...string) error {
+	cmd := exec.Command("/sbin/ip", args...)
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+	cmd.Stdin = os.Stdin
+	err := cmd.Run()
+	return err
 }
+
+
+func RoutePacket(ip net.IP, gateways map[string]*Gateway) (net.IP, error) {
+	for _, gateway := range gateways {
+		for _,route := range gateway.Routes {
+			_, route_net,_ := net.ParseCIDR(route)
+			//routing_ip, routing_net,_ := net.ParseCIDR(ip)
+			if route_net.Contains(ip) {
+				return gateway.Ip, nil
+			}
+		}
+	}
+	return nil, errors.New("Packet does not belong to a Gateway.")
+}
+
 
 func main() {
 	//Parameters
-	version := flag.Bool("version", false, "print lcvpn version")
+	version := flag.Bool("version", false, "print novpn version")
 	client_cert := flag.String("cert","client.crt","client certificate (.crt)")
 	client_key := flag.String("key","client.key","client certificate key (.key)")
 	ca_cert := flag.String("ca","ca.crt","CA certificate (.crt)")
@@ -228,74 +144,79 @@ func main() {
 			fmt.Println("User ID:",authParams.UserID)
 		default:
 			log.Fatal("Ace Server replied: Unknown error ->",resp.Status)
-
 		}
 	}
-
-	//Start SSL agent
-	routeReload := make(chan bool, 1)
-
-	var newConfig VPNState
-
-	newConfig.Main.Port = 444
-	newConfig.Main.Encryption = "aescbc"
-	newConfig.Main.MainKey = authParams.EncryptionKey
-	newEFunc := newAesCbc
-	newConfig.Main.main, err = newEFunc(newConfig.Main.MainKey)
+	//#######################################Client authenticated
+	//Create tunnel
+	iface, err := water.NewTUN("")
 	if nil != err {
-		log.Fatalln("main.mainkey error: %s", err.Error())
+		log.Fatal("Could not create tunnel interface:",err)
+	} else {
+		log.Println("Interface created:",iface.Name())
 	}
-	newConfig.routes = map[*net.IPNet]*net.UDPAddr{}
-	
-	rmtAddr, err := net.ResolveUDPAddr("udp",fmt.Sprintf("%s:%d", "190.190.190.190", 444))
+	err = runIP("link","set","dev",iface.Name(),"mtu",MTU)
+	err = runIP("addr","add","169.254.255.255/32","dev",iface.Name())
+	err = runIP("link","set","dev",iface.Name(),"up")
 	if nil != err {
-		log.Fatalln("Error assigning rmtAddr:",err)
+		log.Fatal("Could not configure tunnel:",err)
+	} else {
+		log.Println("Tunnel configured successfully.")
 	}
-	_, route, err := net.ParseCIDR("10.0.0.0/24")
-	if nil != err {
-		log.Fatalln("Error parsing route:",err)
+	//Get Gateways hostnames and Routes
+	for k, v := range authParams.Gateways {
+		ip, err := net.LookupIP(v.Hostname)
+		if nil != err {
+			log.Println("Could not resolve hostname",v.Hostname)
+		} else {
+			v.Ip = ip[0]
+			log.Println("Gateway's name:",k,"Address:",v.Hostname,"(",v.Ip,")")
+			log.Println("Routes:")
+			for _,route := range v.Routes {
+				//Add route to routing table
+				err := netlink.AddRoute(route, "", "", iface.Name())
+				if nil != err {
+					log.Println("Could not add route",route)
+				} else {
+					log.Println("Route",route,"added successfully.")
+				}
+			}
+		}
 	}
-	newConfig.routes[route] = rmtAddr
-	config.Store(newConfig)
-
-	iface := ifaceSetup("169.254.1.1/32")
-
-	// start routes changes in config monitoring
-	routeReload <- true
-	go routesThread(iface.Name(), routeReload)
-
-	log.Println("Interface parameters configured")
-
-	// Start listen threads
-	for i := 0; i < 4; i++ {
-		go rcvrThread("udp4", 444, iface)
+	packet := make([]byte, BUFFERSIZE)
+	log.Println("Starting interface main loop.")
+	for {
+		plen, err := iface.Read(packet)
+		if nil != err {
+			log.Println("Error reading packet:",err)
+			break
+		} else {
+			log.Println("Received packet with",plen,"bytes on interface.")
+		}
+		header,_ := ipv4.ParseHeader(packet[:plen])
+		//Only IPv4
+		if header.Version != 4 {
+			continue
+		}
+		log.Println("IP Header:",header)
+		routing_gateway, err := RoutePacket(header.Dst,authParams.Gateways)
+		if nil != err {
+			log.Println(err)
+			continue
+		} else {
+			//Route the packet
+			conn, err := net.Dial("udp",fmt.Sprintf("%s:444",routing_gateway))
+			if nil != err {
+				log.Println("Unable to dial gateway",routing_gateway)
+				continue
+			}
+			//Append UserID first, then the packet
+			dst := make([]byte, hex.DecodedLen(len([]byte(authParams.UserID))))
+			hex.Decode(dst,[]byte(authParams.UserID))
+			conn.Write(append(dst,packet[:plen]...))
+		}
 	}
-
-	// init udp socket for write
-
-	writeAddr, err := net.ResolveUDPAddr("udp", ":")
-	if nil != err {
-		log.Fatalln("Unable to get UDP socket:", err)
-	}
-
-	writeConn, err := net.ListenUDP("udp", writeAddr)
-	if nil != err {
-		log.Fatalln("Unable to create UDP socket:", err)
-	}
-
-	// Start sender threads
-
-	for i := 0; i < 4; i++ {
-		go sndrThread(writeConn, iface)
-	}
-
-	exitChan := make(chan os.Signal, 1)
-	signal.Notify(exitChan, syscall.SIGTERM)
-
-	<-exitChan
-
-	err = writeConn.Close()
-	if nil != err {
-		log.Println("Error closing UDP connection: ", err)
-	}
+	log.Println("Exit interface main loop.")
+	reader := bufio.NewReader(os.Stdin)
+	text, _ := reader.ReadString('\n')
+	log.Println(text)
 }

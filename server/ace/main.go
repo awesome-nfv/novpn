@@ -16,7 +16,6 @@ import (
 )
 
 type Gateway struct {
-	Name string
 	Hostname string
 	Routes []string
 }
@@ -151,7 +150,6 @@ func getGatewaysInfo() (map[string]*Gateway,error){
 			log.Println("Error querying database:",err)
 			continue
 		}
-		g.Name = name
 		g.Hostname = hostname
 		g.Routes = make([]string,0,10)
 
