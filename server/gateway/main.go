@@ -4,6 +4,7 @@ import (
 	//"crypto/rand"
 	"flag"
 	"fmt"
+	"bufio"
 	//"io"
 	"log"
 	"net"
@@ -77,4 +78,9 @@ func main() {
 			}
 		}
 	}()
+
+	reader := bufio.NewReader(os.Stdin)
+	text, _ := reader.ReadString('\n')
+	log.Println(text)
+	log.Println(conn)
 }
