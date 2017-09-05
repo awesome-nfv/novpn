@@ -164,21 +164,25 @@ func main() {
 	}
 	//Get Gateways hostnames and Routes
 	for k, v := range authParams.Gateways {
-		ip, err := net.LookupIP(v.Hostname)
+		resolvedIP, err := net.LookupIP(v.Hostname)
+		var ip net.IP
 		if nil != err {
 			log.Println("Could not resolve hostname",v.Hostname)
+			log.Println("Debugging to localhost.")
+			ip = net.ParseIP("127.0.0.1")
 		} else {
-			v.Ip = ip[0]
-			log.Println("Gateway's name:",k,"Address:",v.Hostname,"(",v.Ip,")")
-			log.Println("Routes:")
-			for _,route := range v.Routes {
-				//Add route to routing table
-				err := netlink.AddRoute(route, "", "", iface.Name())
-				if nil != err {
-					log.Println("Could not add route",route)
-				} else {
-					log.Println("Route",route,"added successfully.")
-				}
+			ip = resolvedIP[0]
+		}
+		v.Ip = ip
+		log.Println("Gateway's name:",k,"Address:",v.Hostname,"(",v.Ip,")")
+		log.Println("Routes:")
+		for _,route := range v.Routes {
+			//Add route to routing table
+			err := netlink.AddRoute(route, "", "", iface.Name())
+			if nil != err {
+				log.Println("Could not add route",route)
+			} else {
+				log.Println("Route",route,"added successfully.")
 			}
 		}
 	}
